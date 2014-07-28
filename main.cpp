@@ -1,30 +1,22 @@
 // http://www.seas.upenn.edu/~cis565/fbo.htm
+// http://marina.sys.wakayama-u.ac.jp/~tokoi/?date=20051008
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <vector>
 #include <GL/glew.h>
 #include <GL/glut.h>
+#include "glsl.h"
 
-void initGLEW (void) {
-  // init GLEW, obtain function pointers
-  int err = glewInit();
-  // Warning: This does not check if all extensions used
-  // in a given implementation are actually supported.
-  // Function entry points created by glewInit() will be
-  // NULL in that case!
-  if (GLEW_OK != err) {
-    printf("%s",(char*)glewGetErrorString(err));
-    exit(1);
-  }
-}
+using namespace std;
 
-void read_ppm(const char* filename,
-    int* width, int* height, unsigned char* dat) {
+vector<unsigned char> read_ppm(const char* filename,
+    int* width, int* height) {
   FILE* fp = fopen(filename, "r");
   int type, max, p[3];
   char buf[128];
   if (fp == NULL) {
-    printf("can't open '%s'\n", filename);
+    fprintf(stderr, "error: can't open '%s'\n", filename);
     exit(1);
   }
   fscanf(fp, "P%d\n", &type);
@@ -32,6 +24,8 @@ void read_ppm(const char* filename,
   fscanf(fp, "%d %d", width, height);
   fscanf(fp, "%d", &max);
   const int n = (*width)*(*height)*4;
+  vector<unsigned char> dat;
+  dat.reserve(n);
   for (int i=0; i<n; i+=4) {
     fscanf(fp, "%d %d %d", p, p+1, p+2);
     dat[i+0] = p[0];
@@ -40,6 +34,7 @@ void read_ppm(const char* filename,
     dat[i+3] = 0;
   }
   fclose(fp);
+  return dat;
 }
 
 void write_ppm(const char* filename,
@@ -75,8 +70,8 @@ struct texture {
         GL_TEXTURE_2D,    // target
         0,                // level
         GL_RGBA,          // internalformat
-        texSize,          // width
-        texSize,          // height
+        w,                // width
+        h,                // height
         0,                // border
         GL_RGBA,          // foramt
         GL_UNSIGNED_BYTE, // type
@@ -85,100 +80,122 @@ struct texture {
   }
 
   ~texture() {
-    glDeleteTextures (1,&name);
+    glDeleteTextures(1, &name);
   }
 };
 
-int main(int argc, char **argv) {
+struct frame_buffer_object {
+  GLuint name;
+  frame_buffer_object() {
+    glGenFramebuffers(1, &name);
+    glBindFramebuffer(GL_FRAMEBUFFER, name);
+  }
+  ~frame_buffer_object() {
+    glDeleteFramebuffers(1, &name);
+  }
+
+  void attach(const texture& tex) {
+    // https://www.khronos.org/opengles/sdk/docs/man/xhtml/glFramebufferTexture2D.xml
+    glFramebufferTexture2D(
+        GL_FRAMEBUFFER,
+        GL_COLOR_ATTACHMENT0,
+        GL_TEXTURE_2D,
+        tex.name,
+        0
+        );
+  }
+};
+
+struct shader {
+  shader() {
+    GLint compiled, linked;
+
+    /* シェーダオブジェクトの作成 */
+    GLuint vertShader = glCreateShader(GL_VERTEX_SHADER);
+    GLuint fragShader = glCreateShader(GL_FRAGMENT_SHADER);
+
+    /* シェーダのソースプログラムの読み込み */
+    if (readShaderSource(vertShader, "texture.vert")) exit(1);
+    if (readShaderSource(fragShader, "texture.frag")) exit(1);
+
+    /* バーテックスシェーダのソースプログラムのコンパイル */
+    glCompileShader(vertShader);
+    glGetShaderiv(vertShader, GL_COMPILE_STATUS, &compiled);
+    printShaderInfoLog(vertShader);
+    if (compiled == GL_FALSE) {
+      fprintf(stderr, "Compile error in vertex shader.¥n");
+      exit(1);
+    }
+
+    /* フラグメントシェーダのソースプログラムのコンパイル */
+    glCompileShader(fragShader);
+    glGetShaderiv(fragShader, GL_COMPILE_STATUS, &compiled);
+    printShaderInfoLog(fragShader);
+    if (compiled == GL_FALSE) {
+      fprintf(stderr, "Compile error in fragment shader.¥n");
+      exit(1);
+    }
+
+    /* プログラムオブジェクトの作成 */
+    GLuint gl2Program = glCreateProgram();
+
+    /* シェーダオブジェクトのシェーダプログラムへの登録 */
+    glAttachShader(gl2Program, vertShader);
+    glAttachShader(gl2Program, fragShader);
+
+    /* シェーダオブジェクトの削除 */
+    glDeleteShader(vertShader);
+    glDeleteShader(fragShader);
+
+    /* シェーダプログラムのリンク */
+    glLinkProgram(gl2Program);
+    glGetProgramiv(gl2Program, GL_LINK_STATUS, &linked);
+    printProgramInfoLog(gl2Program);
+    if (linked == GL_FALSE) {
+      fprintf(stderr, "Link error.¥n");
+      exit(1);
+    }
+
+    /* シェーダプログラムの適用 */
+    glUseProgram(gl2Program);
+
+    /* テクスチャユニット０を指定する */
+    glUniform1i(glGetUniformLocation(gl2Program, "texture"), 0);
+    glActiveTexture(GL_TEXTURE0);
+  }
+};
+
+void initGL(int* argc, char** argv) {
   // set up glut to get valid GL context and
   // get extension entry points
-  glutInit(&argc, argv);
+  glutInit(argc, argv);
   glutCreateWindow("TEST1");
 
-  initGLEW();
+  // init GLEW, obtain function pointers
+  int err = glewInit();
+  // Warning: This does not check if all extensions used
+  // in a given implementation are actually supported.
+  // Function entry points created by glewInit() will be
+  // NULL in that case!
+  if (GLEW_OK != err) {
+    printf("%s",(char*)glewGetErrorString(err));
+    exit(1);
+  }
 
-  // declare texture size, the actual data will be a vector
-  // of size texSize*texSize*4
-  int texSize = 512;
-  // create test data
-  unsigned char* data   = new unsigned char[4*texSize*texSize];
-  unsigned char* result = new unsigned char[4*texSize*texSize];
+  glslInit();
+}
 
-  int w, h;
-  read_ppm("/Users/jun/work/test01.ppm", &w, &h, data);
-
+void resize(int w, int h) {
   // viewport transform for 1:1 pixel=texel=data mapping
   glMatrixMode(GL_PROJECTION);
   glLoadIdentity();
   //gluOrtho2D(0.0,texSize,0.0,texSize);
   glMatrixMode(GL_MODELVIEW);
   glLoadIdentity();
-  glViewport(0,0,texSize,texSize);
+  glViewport(0,0,w,h);
+}
 
-  // create FBO and bind it (that is, use offscreen render target)
-  GLuint fb;
-  glGenFramebuffers(1, &fb);
-  glBindFramebuffer(GL_FRAMEBUFFER, fb);
-
-  // create texture
-  GLuint tex;
-  // https://www.khronos.org/opengles/sdk/docs/man/xhtml/glGenTextures.xml
-  glGenTextures(
-      1,   // n, the number of textures to be generated
-      &tex // textures
-      );
-  glBindTexture(GL_TEXTURE_2D, tex);
-
-  // set texture parameters
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
-
-  // define texture with floating point format
-  // https://www.khronos.org/opengles/sdk/docs/man/xhtml/glTexImage2D.xml
-  glTexImage2D(
-      GL_TEXTURE_2D,    // target
-      0,                // level
-      GL_RGBA,          // internalformat
-      texSize,          // width
-      texSize,          // height
-      0,                // border
-      GL_RGBA,          // foramt
-      GL_UNSIGNED_BYTE, // type
-      0                 // data
-      );
-
-  // attach texture
-  // https://www.khronos.org/opengles/sdk/docs/man/xhtml/glFramebufferTexture2D.xml
-  glFramebufferTexture2D(
-      GL_FRAMEBUFFER,
-      GL_COLOR_ATTACHMENT0,
-      GL_TEXTURE_2D,
-      tex,
-      0
-      );
-
-  // copy from cpu memory to gpu texture
-  // https://www.khronos.org/opengles/sdk/docs/man/xhtml/glTexSubImage2D.xml
-  //glTexSubImage2D(
-  //    GL_TEXTURE_2D,    // target
-  //    0,                // level
-  //    0,                // xoffset
-  //    0,                // yoffset
-  //    texSize,          // width
-  //    texSize,          // height
-  //    GL_RGBA,          // format
-  //    GL_UNSIGNED_BYTE, // type
-  //    data              // data
-  //    );
-
-  //glClearColor(0.3f, 0.3f, 1.0f, 0.5f);
-  //glDisable(GL_LIGHTING);
-  //glDisable(GL_DEPTH_TEST);
-
-  //glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
+void execute() {
   /* １枚の４角形を描く */
   glNormal3d(0.0, 0.0, 1.0);
   glBegin(GL_QUADS);
@@ -191,34 +208,40 @@ int main(int argc, char **argv) {
   glTexCoord2d(0.0, 0.0);
   glVertex3d(-1.0,  1.0,  0.0);
   glEnd();
-
   glFlush();
+}
 
+int main(int argc, char **argv) {
+  initGL(&argc, argv);
+
+  if (argc != 2) {
+    fprintf(stderr, "usage: %s IN_PPM\n", argv[0]);
+    exit(1);
+  }
+
+  int w, h;
+  vector<unsigned char> data = read_ppm(argv[1], &w, &h);
+  vector<unsigned char> result;
+  result.reserve(w*h*4);
+
+  resize(w, h);
+  shader sh;
+
+  // create FBO and bind it (that is, use offscreen render target)
+  frame_buffer_object fbo;
+  // create output texture
+  texture tex_out(w, h);
+  // attach texture
+  fbo.attach(tex_out);
+  // create input texture
+  texture tex_in(w, h, &data[0]);
+  // execute caclulation
+  execute();
   // and read back
   glReadBuffer(GL_COLOR_ATTACHMENT0);
-  glReadPixels(0, 0, texSize, texSize,GL_RGBA,GL_UNSIGNED_BYTE,result);
+  glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, &result[0]);
 
-  // // print out results
-  // printf("Data before roundtrip:\n");
-  // for (int y=0; y<texSize; y++) {
-  //   for (int x=0; x<texSize; x++) {
-  //     for (int i=0; i<4; i++)
-  //       printf("%02x", data[texSize*4*y+4*x+i]);
-  //     printf(" ");
-  //   }
-  //   printf("\n");
-  // }
-  // printf("Data after roundtrip:\n");
-  // for (int i=0; i<texSize*texSize*4; i++) printf("%d\n",result[i]);
-
-  //write_ppm("out.ppm", texSize, texSize, result);
-  write_ppm("out.ppm", texSize, texSize, data);
-
-  // clean up
-  delete data;
-  delete result;
-  glDeleteFramebuffers(1,&fb);
-  glDeleteTextures (1,&tex);
+  write_ppm("out.ppm", w, h, &result[0]);
 
   return 0;
 }
